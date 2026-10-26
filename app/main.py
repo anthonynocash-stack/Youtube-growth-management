@@ -6,9 +6,10 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import urllib.error
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,9 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageFont
+from apscheduler.schedulers.background import BackgroundScheduler
 from starlette.middleware.sessions import SessionMiddleware
 
 load_dotenv()
@@ -35,10 +38,14 @@ AI_TTS_VOICE = os.getenv("AI_TTS_VOICE", "alloy")
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg")
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe")
 VIDEO_OUTPUT_DIR = Path(os.getenv("VIDEO_OUTPUT_DIR", "rendered-videos")).resolve()
-SCOPES = [
+READ_SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
+UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+UPLOAD_SCOPES = READ_SCOPES + [UPLOAD_SCOPE]
+AUTOPILOT_LOCK = threading.Lock()
+SCHEDULER = BackgroundScheduler(daemon=True)
 CLIENT_CONFIG = {
     "web": {
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
@@ -78,16 +85,27 @@ def init_db() -> None:
         db.execute("""CREATE TABLE IF NOT EXISTS content_packs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT NOT NULL, format TEXT NOT NULL,
             audience TEXT NOT NULL, duration TEXT NOT NULL, body TEXT NOT NULL, video_file TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            youtube_video_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
         columns = {row["name"] for row in db.execute("PRAGMA table_info(content_packs)")}
         if "video_file" not in columns:
             db.execute("ALTER TABLE content_packs ADD COLUMN video_file TEXT")
+        if "youtube_video_id" not in columns:
+            db.execute("ALTER TABLE content_packs ADD COLUMN youtube_video_id TEXT")
 
 
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    if not SCHEDULER.running:
+        SCHEDULER.add_job(autopilot_tick, "interval", minutes=1, id="creatorflow-autopilot", max_instances=1, coalesce=True, replace_existing=True)
+        SCHEDULER.start()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    if SCHEDULER.running:
+        SCHEDULER.shutdown(wait=False)
 
 
 def get_setting(key: str) -> str | None:
@@ -107,7 +125,7 @@ def load_credentials() -> Credentials | None:
         return None
     try:
         info = json.loads(raw)
-        creds = Credentials.from_authorized_user_info(info, SCOPES)
+        creds = Credentials.from_authorized_user_info(info)
         if creds.expired and creds.refresh_token:
             creds.refresh(GoogleRequest())
             save_setting("google_credentials", creds.to_json())
@@ -169,7 +187,7 @@ def get_ideas() -> list[dict[str, Any]]:
 
 def get_content_packs() -> list[dict[str, Any]]:
     with connect_db() as db:
-        return [dict(row) for row in db.execute("SELECT id,topic,format,audience,duration,created_at,video_file FROM content_packs ORDER BY id DESC LIMIT 12")]
+        return [dict(row) for row in db.execute("SELECT id,topic,format,audience,duration,created_at,video_file,youtube_video_id FROM content_packs ORDER BY id DESC LIMIT 12")]
 
 
 def generate_content_pack(topic: str, audience: str, viewer_value: str, video_format: str, duration: str) -> str:
@@ -409,7 +427,8 @@ def recommendations(data: dict[str, Any]) -> list[dict[str, str]]:
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
-    creds = load_credentials()
+    terms_accepted = get_setting("service_terms_accepted") == "true"
+    creds = load_credentials() if terms_accepted else None
     error = request.session.pop("oauth_error", None)
     data = demo_data()
     if creds:
@@ -418,10 +437,19 @@ def dashboard(request: Request):
         except Exception as exc:
             error = f"YouTube data could not be loaded: {str(exc)[:180]}"
     ideas = get_ideas()
+    autopilot_profile = get_autopilot_profile()
+    upload_authorized = bool(creds and creds.has_scopes([UPLOAD_SCOPE]))
     return templates.TemplateResponse("dashboard.html", {
         "request": request, "data": data, "ideas": ideas,
         "recommendations": recommendations(data), "error": error,
         "configured": bool(CLIENT_CONFIG["web"]["client_id"] and CLIENT_CONFIG["web"]["client_secret"]),
+        "autopilot_profile": autopilot_profile,
+        "autopilot_enabled": get_setting("autopilot_enabled") == "true",
+        "autopilot_status": get_setting("autopilot_status"),
+        "autopilot_next_run": get_setting("autopilot_next_run"),
+        "autopilot_error": request.session.pop("autopilot_error", None),
+        "upload_authorized": upload_authorized,
+        "terms_accepted": terms_accepted,
     })
 
 
@@ -513,25 +541,217 @@ def download_rendered_video(pack_id: int):
     return FileResponse(video_path, media_type="video/mp4", filename=f"creatorflow-{pack_id}.mp4")
 
 
+def get_autopilot_profile() -> dict[str, Any]:
+    try:
+        return json.loads(get_setting("autopilot_profile") or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def parse_pack_metadata(body: str, topic: str, audience: str) -> dict[str, Any]:
+    title_block = re.search(r"^\s*(?:#{1,4}\s*)?2[.)]?\s*Three honest title options\b[^\n]*\n(.*?)(?=^\s*(?:#{1,4}\s*)?3[.)]?\s*Thumbnail\b|\Z)", body, re.I | re.S | re.M)
+    title = ""
+    if title_block:
+        for line in title_block.group(1).splitlines():
+            candidate = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip().strip('"\'“”')
+            if candidate and not candidate.startswith("#"):
+                title = candidate
+                break
+    if not title:
+        title = topic.strip()
+    if len(title) > 100:
+        raise RuntimeError("Generated title exceeds YouTube's 100-character limit. Skipping this scheduled upload.")
+    section = re.search(r"^\s*(?:#{1,4}\s*)?6[.)]?\s*Description\b[^\n]*\n(.*?)(?=^\s*(?:#{1,4}\s*)?7[.)]?\s*Shorts cut-down\b|\Z)", body, re.I | re.S | re.M)
+    section_text = section.group(1) if section else ""
+    desc = re.search(r"(?:^|\n)\s*(?:#{1,5}\s*)?(?:\*\*)?Description(?:\*\*)?\s*:?\s*\n(.*?)(?=\n\s*(?:#{1,5}\s*)?(?:\*\*)?(?:Tags|Chapters)(?:\*\*)?\s*:?\s*\n|\Z)", section_text, re.I | re.S)
+    description = desc.group(1).strip() if desc else f"{topic}\n\nCreated for {audience}."
+    description = re.sub(r"^\s*#{1,5}\s*", "", description, flags=re.M).strip()
+    if len(description) > 5000:
+        description = description[:5000]
+    tags_match = re.search(r"(?:^|\n)\s*(?:#{1,5}\s*)?(?:\*\*)?Tags(?:\*\*)?\s*:?\s*\n(.*?)(?=\n\s*(?:#{1,5}\s*)?(?:\*\*)?Chapters|\Z)", section_text, re.I | re.S)
+    tags_text = tags_match.group(1).strip() if tags_match else ""
+    tags = [tag.strip().lstrip("#") for tag in re.split(r"[,\n]", tags_text) if tag.strip()]
+    bounded_tags, total = [], 0
+    for tag in tags:
+        if len(tag) > 100 or total + len(tag) > 450:
+            continue
+        if tag.lower() not in {item.lower() for item in bounded_tags}:
+            bounded_tags.append(tag)
+            total += len(tag)
+    return {"title": title, "description": description, "tags": bounded_tags[:15]}
+
+
+def generate_autopilot_topic(profile: dict[str, Any], recent_topics: list[str]) -> tuple[str, str]:
+    prompt = f"""Choose one original next-video topic for this creator. Make it distinct from recent uploads and useful to the stated audience. Do not chase breaking news or invent facts. Avoid generic template content. Return only a JSON object with string fields topic and viewer_value.
+
+Channel niche: {profile['niche']}
+Audience: {profile['audience']}
+Creator's unique perspective: {profile['original_angle']}
+Recent topics to avoid repeating: {json.dumps(recent_topics, ensure_ascii=False)}
+"""
+    payload = json.dumps({"model": AI_MODEL, "messages": [
+        {"role": "system", "content": "You are a thoughtful YouTube editorial producer. Suggest a specific original video idea, never engagement manipulation or a factual claim presented without verification."},
+        {"role": "user", "content": prompt},
+    ], "temperature": 0.8}).encode("utf-8")
+    req = urllib.request.Request(AI_API_BASE_URL + "/chat/completions", data=payload, headers={"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=180) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        raw = result["choices"][0]["message"]["content"]
+        match = re.search(r"\{.*\}", raw, re.S)
+        idea = json.loads(match.group(0)) if match else {}
+        topic, value = str(idea.get("topic", "")).strip(), str(idea.get("viewer_value", "")).strip()
+        if not topic or not value:
+            raise RuntimeError("AI provider did not return a valid original topic.")
+        return topic[:300], value[:500]
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"AI provider returned HTTP {exc.code} while choosing a topic.") from None
+    except urllib.error.URLError:
+        raise RuntimeError("Could not reach the AI provider while choosing a topic.") from None
+    except (KeyError, IndexError, json.JSONDecodeError, TypeError):
+        raise RuntimeError("AI provider returned an invalid topic response.") from None
+
+
+def autopilot_tick() -> None:
+    if not AUTOPILOT_LOCK.acquire(blocking=False):
+        return
+    try:
+        profile = get_autopilot_profile()
+        if get_setting("autopilot_enabled") != "true" or not profile or get_setting("service_terms_accepted") != "true":
+            return
+        now = datetime.now(timezone.utc)
+        next_run = get_setting("autopilot_next_run")
+        if next_run and datetime.fromisoformat(next_run) > now:
+            return
+        creds = load_credentials()
+        if not creds or not creds.has_scopes([UPLOAD_SCOPE]):
+            raise RuntimeError("YouTube upload permission is missing. Connect upload access again, then re-enable Autopilot.")
+        with connect_db() as db:
+            recent = [row["topic"] for row in db.execute("SELECT topic FROM content_packs ORDER BY id DESC LIMIT 20")]
+        topic, unique_value = generate_autopilot_topic(profile, recent)
+        body = generate_content_pack(topic, profile["audience"], profile["original_angle"] + " " + unique_value, profile["format"], profile["duration"])
+        with connect_db() as db:
+            cursor = db.execute("INSERT INTO content_packs(topic,format,audience,duration,body) VALUES(?,?,?,?,?)", (topic, profile["format"], profile["audience"], profile["duration"], body))
+            pack_id = cursor.lastrowid
+        pack = {"id": pack_id, "topic": topic, "format": profile["format"], "duration": profile["duration"], "body": body}
+        video_name = f"creatorflow-{pack_id}.mp4"
+        video_path = VIDEO_OUTPUT_DIR / video_name
+        render_video(pack, video_path)
+        with connect_db() as db:
+            db.execute("UPDATE content_packs SET video_file=? WHERE id=?", (video_name, pack_id))
+        metadata = parse_pack_metadata(body, topic, profile["audience"])
+        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        request_body = {
+            "snippet": {"title": metadata["title"], "description": metadata["description"], "tags": metadata["tags"], "categoryId": profile["category_id"]},
+            "status": {"privacyStatus": profile["privacy_status"], "selfDeclaredMadeForKids": profile["made_for_kids"], "containsSyntheticMedia": True},
+        }
+        upload = youtube.videos().insert(part="snippet,status", body=request_body, media_body=MediaFileUpload(str(video_path), chunksize=8 * 1024 * 1024, resumable=True))
+        response = None
+        while response is None:
+            _, response = upload.next_chunk()
+        video_id = response.get("id")
+        if not video_id:
+            raise RuntimeError("YouTube did not return a video ID after upload.")
+        with connect_db() as db:
+            db.execute("UPDATE content_packs SET youtube_video_id=? WHERE id=?", (video_id, pack_id))
+        cadence = int(profile["cadence_days"])
+        save_setting("autopilot_status", f"Uploaded {topic}: https://youtu.be/{video_id}")
+        save_setting("autopilot_next_run", (datetime.now(timezone.utc) + timedelta(days=cadence)).isoformat())
+    except Exception as exc:
+        save_setting("autopilot_status", f"Autopilot encountered an error and will retry in 24 hours: {str(exc)[:240]}")
+        save_setting("autopilot_next_run", (datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
+    finally:
+        AUTOPILOT_LOCK.release()
+
+
+@app.post("/autopilot/settings")
+def save_autopilot_settings(
+    request: Request,
+    niche: str = Form(...), audience: str = Form(...), original_angle: str = Form(...),
+    video_format: str = Form("Long-form video"), duration: str = Form("6-8 minutes"),
+    cadence_days: int = Form(7), privacy_status: str = Form("private"),
+    category_id: str = Form("27"), made_for_kids: str = Form("false"),
+    enable_autopilot: str = Form(""), consent: str = Form(""),
+):
+    allowed_formats = {"Long-form video", "YouTube Short", "Educational tutorial", "Story / documentary"}
+    profile = {
+        "niche": niche.strip()[:300], "audience": audience.strip()[:240], "original_angle": original_angle.strip()[:500],
+        "format": video_format if video_format in allowed_formats else "Long-form video", "duration": duration[:40],
+        "cadence_days": cadence_days if cadence_days in {1, 2, 3, 7} else 7,
+        "privacy_status": privacy_status if privacy_status in {"public", "private", "unlisted"} else "private",
+        "category_id": category_id[:3] if category_id.isdigit() else "27", "made_for_kids": made_for_kids.lower() == "true",
+    }
+    enabled = enable_autopilot == "yes"
+    error = None
+    if get_setting("service_terms_accepted") != "true":
+        error = "Review and accept the CreatorFlow and YouTube terms before configuring Autopilot."
+        enabled = False
+    if not profile["niche"] or not profile["audience"] or not profile["original_angle"]:
+        error = "Complete the channel niche, target audience, and original point of view before saving."
+        enabled = False
+    if privacy_status not in {"public", "private", "unlisted"}:
+        error = "Choose the visibility setting Autopilot should use for every upload."
+        enabled = False
+    if made_for_kids.lower() not in {"true", "false"}:
+        error = "Choose whether the automated videos are made for kids."
+        enabled = False
+    if enabled and consent != "yes":
+        error = "Explicit upload consent is required to turn on scheduled publishing."
+        enabled = False
+    creds = load_credentials()
+    if enabled and (not creds or not creds.has_scopes([UPLOAD_SCOPE])):
+        error = "Authorize YouTube uploads first, then enable Autopilot."
+        enabled = False
+    save_setting("autopilot_profile", json.dumps(profile))
+    save_setting("autopilot_enabled", "true" if enabled else "false")
+    if enabled:
+        save_setting("autopilot_status", "Autopilot is enabled. The first original video is queued to generate and publish within about one minute.")
+        save_setting("autopilot_next_run", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+    elif not error:
+        save_setting("autopilot_status", "Autopilot is off. Your channel profile is saved.")
+    request.session["autopilot_error"] = error
+    return RedirectResponse("/#autopilot", status_code=303)
+
+
 @app.get("/auth/start")
 def auth_start(request: Request):
+    if get_setting("service_terms_accepted") != "true":
+        request.session["oauth_error"] = "Review and accept the CreatorFlow and YouTube terms before connecting."
+        return RedirectResponse("/#legal-gate", status_code=303)
     if not CLIENT_CONFIG["web"]["client_id"] or not CLIENT_CONFIG["web"]["client_secret"]:
         request.session["oauth_error"] = "Add Google OAuth credentials to .env before connecting."
         return RedirectResponse("/", status_code=303)
-    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
+    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=READ_SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
     url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     request.session["oauth_state"] = state
+    request.session["oauth_scopes"] = READ_SCOPES
+    return RedirectResponse(url, status_code=302)
+
+
+@app.get("/auth/upload")
+def auth_upload(request: Request):
+    if get_setting("service_terms_accepted") != "true":
+        request.session["oauth_error"] = "Review and accept the CreatorFlow and YouTube terms before connecting."
+        return RedirectResponse("/#legal-gate", status_code=303)
+    if not CLIENT_CONFIG["web"]["client_id"] or not CLIENT_CONFIG["web"]["client_secret"]:
+        request.session["oauth_error"] = "Add Google OAuth credentials to .env before connecting."
+        return RedirectResponse("/#autopilot", status_code=303)
+    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=UPLOAD_SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
+    url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
+    request.session["oauth_state"] = state
+    request.session["oauth_scopes"] = UPLOAD_SCOPES
     return RedirectResponse(url, status_code=302)
 
 
 @app.get("/auth/callback")
 def auth_callback(request: Request, state: str = "", code: str = "", error: str = ""):
     expected = request.session.pop("oauth_state", None)
+    scopes = request.session.pop("oauth_scopes", READ_SCOPES)
     if error or not expected or state != expected:
         request.session["oauth_error"] = "Google sign-in was cancelled or its security state did not match. Please try again."
         return RedirectResponse("/", status_code=303)
     try:
-        flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, state=state, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
+        flow = Flow.from_client_config(CLIENT_CONFIG, scopes=scopes, state=state, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
         flow.fetch_token(code=code)
         save_setting("google_credentials", flow.credentials.to_json())
     except Exception:
@@ -543,7 +763,15 @@ def auth_callback(request: Request, state: str = "", code: str = "", error: str 
 def disconnect():
     with connect_db() as db:
         db.execute("DELETE FROM settings WHERE key='google_credentials'")
+        db.execute("INSERT INTO settings(key,value) VALUES('autopilot_enabled','false') ON CONFLICT(key) DO UPDATE SET value='false'")
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/legal/accept")
+def accept_terms(accept: str = Form("")):
+    if accept == "yes":
+        save_setting("service_terms_accepted", "true")
+    return RedirectResponse("/#autopilot", status_code=303)
 
 
 @app.post("/ideas")

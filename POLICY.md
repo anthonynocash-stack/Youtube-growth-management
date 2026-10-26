@@ -11,6 +11,7 @@ CreatorFlow is designed to support compliant channel operations, but it cannot c
 5. **Human approval.** A person reviews the final script, footage, title, description, thumbnail, sponsorship disclosures, audience settings, and upload. There is no unattended publish action.
 6. **No monetization promise.** Analytics estimates and recommendations cannot guarantee eligibility, ad suitability, revenue, or continued monetization.
 7. **AI is a production aid.** Generated scripts, synthetic narration, and visual cards may include errors, clichés, or material that needs rights review. A creator must add authentic perspective, verify claims, and make required disclosures; generated content should not be published as interchangeable bulk output. Review whether the video's synthetic narration or other altered media needs disclosure.
+8. **Autopilot requires express consent.** When enabled, it creates and uploads on the channel, cadence, audience, format, and visibility configured by the owner without asking for approval on each video. The owner must authorize the upload scope and can stop future runs. Autopilot cannot guarantee that every output satisfies YouTube rules or will be monetized.
 
 ## Official references
 

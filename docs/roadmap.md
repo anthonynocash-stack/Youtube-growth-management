@@ -7,6 +7,7 @@
 - Local editorial calendar and manual workflow states.
 - Deterministic, explainable content experiments.
 - AI-assisted, creator-specific scripts and complete video production packs.
+- Explicitly authorized scheduled generation, narrated rendering, and YouTube upload Autopilot.
 - Policy and security documentation.
 
 ## Before a public multi-user launch
@@ -15,7 +16,7 @@
 - Google OAuth consent screen verification and production domain configuration.
 - CSRF protection, rate limiting, audit logs, backups, migrations, and dependency scanning.
 - Accessibility review, localization, and privacy/legal review.
-- User-configurable approval workflow and channel ownership checks.
+- Multi-user tenant isolation, verified consent records, and channel ownership checks.
 
 ## Later opportunities
 
