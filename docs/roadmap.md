@@ -22,6 +22,6 @@
 - Thumbnail/title experiment journal using creator-entered results.
 - Audience question clustering from creator-provided exports with privacy controls.
 - Revenue reporting where the account and API permissions allow it.
-- Optional rendered video generation, licensed asset integrations, and text-to-speech after provider and rights workflows are reviewed.
+- Licensed asset integrations, richer original visual generation, and creator-controlled upload scheduling after provider and rights workflows are reviewed.
 
 The roadmap intentionally excludes fake engagement, automated comment campaigns, scraped-content publishing, and guaranteed growth or revenue claims.

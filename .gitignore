@@ -3,5 +3,6 @@
 __pycache__/
 *.py[cod]
 *.db
+rendered-videos/
 .pytest_cache/
 .ruff_cache/

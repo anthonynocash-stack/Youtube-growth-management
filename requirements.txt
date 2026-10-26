@@ -6,3 +6,4 @@ itsdangerous>=2.2,<3
 google-auth-oauthlib>=1.2,<2
 google-api-python-client>=2.140,<3
 python-dotenv>=1.0,<2
+Pillow>=10,<13

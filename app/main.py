@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Form, Request
@@ -19,6 +21,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from PIL import Image, ImageDraw, ImageFont
 from starlette.middleware.sessions import SessionMiddleware
 
 load_dotenv()
@@ -27,6 +30,11 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "creatorflow.db")
 AI_API_BASE_URL = os.getenv("AI_API_BASE_URL", "").rstrip("/")
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "")
+AI_TTS_MODEL = os.getenv("AI_TTS_MODEL", "")
+AI_TTS_VOICE = os.getenv("AI_TTS_VOICE", "alloy")
+FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg")
+FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe")
+VIDEO_OUTPUT_DIR = Path(os.getenv("VIDEO_OUTPUT_DIR", "rendered-videos")).resolve()
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
@@ -69,9 +77,12 @@ def init_db() -> None:
         )""")
         db.execute("""CREATE TABLE IF NOT EXISTS content_packs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT NOT NULL, format TEXT NOT NULL,
-            audience TEXT NOT NULL, duration TEXT NOT NULL, body TEXT NOT NULL,
+            audience TEXT NOT NULL, duration TEXT NOT NULL, body TEXT NOT NULL, video_file TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(content_packs)")}
+        if "video_file" not in columns:
+            db.execute("ALTER TABLE content_packs ADD COLUMN video_file TEXT")
 
 
 @app.on_event("startup")
@@ -158,7 +169,7 @@ def get_ideas() -> list[dict[str, Any]]:
 
 def get_content_packs() -> list[dict[str, Any]]:
     with connect_db() as db:
-        return [dict(row) for row in db.execute("SELECT id,topic,format,audience,duration,created_at FROM content_packs ORDER BY id DESC LIMIT 12")]
+        return [dict(row) for row in db.execute("SELECT id,topic,format,audience,duration,created_at,video_file FROM content_packs ORDER BY id DESC LIMIT 12")]
 
 
 def generate_content_pack(topic: str, audience: str, viewer_value: str, video_format: str, duration: str) -> str:
@@ -210,6 +221,175 @@ Write for this one topic and audience, not as interchangeable mass-produced cont
         raise RuntimeError("The AI provider response was not in the expected chat completions format.") from None
 
 
+def script_from_pack(body: str) -> str:
+    match = re.search(r"^\s*(?:#{1,4}\s*)?(?:4[.)]\s*)?(?:full spoken script|spoken script|script)\b[^\n]*\n(.*?)(?=^\s*(?:#{1,4}\s*)?(?:5[.)]\s*)?(?:scene-by-scene storyboard|storyboard)\b|\Z)", body, re.I | re.S | re.M)
+    section = match.group(1) if match else body
+    cleaned = re.sub(r"^\s*#{1,6}\s*.*$", "", section, flags=re.M)
+    cleaned = re.sub(r"^\s*\*\*[^\n]+\*\*\s*$", "", cleaned, flags=re.M)
+    cleaned = re.sub(r"\b\d{1,2}:\d{2}(?:\s*[-–—]\s*\d{1,2}:\d{2})?\b", "", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"[*_`>#]", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    if len(cleaned.split()) < 30:
+        raise RuntimeError("This pack does not contain enough spoken script to render. Regenerate it with a complete script first.")
+    return cleaned
+
+
+def make_scenes(script: str, title: str) -> list[dict[str, str]]:
+    paragraphs = [re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", p).strip() for p in re.split(r"\n\s*\n", script) if p.strip()]
+    words = " ".join(paragraphs).split()
+    groups = []
+    target = max(35, min(75, len(words) // 6 or 35))
+    for i in range(0, len(words), target):
+        groups.append(" ".join(words[i:i + target]))
+    if len(groups) > 9:
+        step = (len(groups) + 8) // 9
+        groups = [" ".join(groups[i:i + step]) for i in range(0, len(groups), step)]
+    return [{"label": f"{i + 1:02d}  /  {title[:46]}", "copy": group} for i, group in enumerate(groups)]
+
+
+def load_font(size: int, bold: bool = False):
+    candidates = ["DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", "arialbd.ttf" if bold else "arial.ttf"]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[str]:
+    lines, current = [], ""
+    for word in text.split():
+        candidate = f"{current} {word}".strip()
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def render_scene_card(path: Path, scene: dict[str, str], index: int, seed: str, vertical: bool = False) -> None:
+    width, height = (720, 1280) if vertical else (1280, 720)
+    palettes = [(31, 29, 58), (37, 43, 68), (35, 48, 60), (49, 39, 67), (31, 48, 56)]
+    base = palettes[(index + sum(seed.encode("utf-8"))) % len(palettes)]
+    image = Image.new("RGB", (width, height), base)
+    draw = ImageDraw.Draw(image, "RGBA")
+    accent = (153, 136, 255, 210)
+    if vertical:
+        draw.ellipse((410, -140, 850, 300), outline=(*accent[:3], 42), width=3)
+        draw.ellipse((465, -85, 795, 245), outline=(*accent[:3], 54), width=2)
+        draw.rounded_rectangle((42, 62, 270, 105), radius=18, fill=(255, 255, 255, 20), outline=(255, 255, 255, 30))
+        draw.text((56, 75), "CREATORFLOW  /  ORIGINAL", font=load_font(13, True), fill=(222, 218, 255, 255))
+        draw.text((44, 165), scene["label"], font=load_font(16, True), fill=(183, 174, 255, 255))
+        text_y, font_size, max_width, max_lines = 285, 35, 625, 12
+        progress_y, footer_y = 1140, 1170
+    else:
+        draw.ellipse((890, -220, 1450, 340), outline=(*accent[:3], 42), width=3)
+        draw.ellipse((965, -155, 1375, 255), outline=(*accent[:3], 54), width=2)
+        draw.rounded_rectangle((76, 65, 250, 105), radius=18, fill=(255, 255, 255, 20), outline=(255, 255, 255, 30))
+        draw.text((94, 75), "CREATORFLOW  /  ORIGINAL", font=load_font(14, True), fill=(222, 218, 255, 255))
+        draw.text((78, 156), scene["label"], font=load_font(18, True), fill=(183, 174, 255, 255))
+        text_y, font_size, max_width, max_lines = 225, 38, 940, 4
+        progress_y, footer_y = 602, 632
+    body = scene["copy"]
+    if len(body) > 185:
+        body = body[:182].rsplit(" ", 1)[0] + "…"
+    lines = wrap_text(draw, body, load_font(font_size, True), max_width)[:max_lines]
+    y = text_y
+    for line in lines:
+        draw.text((44 if vertical else 78, y), line, font=load_font(font_size, True), fill=(250, 249, 255, 255), stroke_width=0)
+        y += 51 if vertical else 57
+    bar_left = 44 if vertical else 78
+    bar_width = width - (88 if vertical else 156)
+    draw.rounded_rectangle((bar_left, progress_y, bar_left + bar_width, progress_y + 8), radius=4, fill=(255, 255, 255, 32))
+    draw.rounded_rectangle((bar_left, progress_y, bar_left + int(bar_width * ((index + 1) / max(index + 2, 2))), progress_y + 8), radius=4, fill=accent)
+    draw.text((bar_left, footer_y), f"SCENE {index + 1:02d}", font=load_font(17, True), fill=(194, 190, 220, 255))
+    image.save(path, format="PNG", optimize=True)
+
+
+def synthesize_narration(text: str, output_path: Path) -> None:
+    if not (AI_API_BASE_URL and AI_API_KEY and AI_TTS_MODEL):
+        raise RuntimeError("Set AI_TTS_MODEL in .env to enable voiceover generation with your configured AI provider.")
+    payload = json.dumps({"model": AI_TTS_MODEL, "voice": AI_TTS_VOICE, "input": text, "response_format": "mp3"}).encode("utf-8")
+    req = urllib.request.Request(
+        AI_API_BASE_URL + "/audio/speech", data=payload,
+        headers={"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=240) as response:
+            audio = response.read()
+        if not audio:
+            raise RuntimeError("The speech provider returned an empty audio file.")
+        output_path.write_bytes(audio)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Speech provider returned HTTP {exc.code}. Check AI_TTS_MODEL and voice compatibility.") from None
+    except urllib.error.URLError:
+        raise RuntimeError("Could not reach the speech provider. Check the endpoint and network connection.") from None
+
+
+def render_video(pack: dict[str, Any], output_path: Path) -> None:
+    script = script_from_pack(pack["body"])
+    scenes = make_scenes(script, pack["topic"])
+    vertical = "short" in pack["format"].lower() or "30-60" in pack["duration"]
+    frame_width, frame_height = (720, 1280) if vertical else (1280, 720)
+    VIDEO_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"creatorflow-{pack['id']}-", dir=VIDEO_OUTPUT_DIR) as temp_dir:
+        temp = Path(temp_dir)
+        audio_path = temp / "voiceover.mp3"
+        synthesize_narration(script, audio_path)
+        try:
+            probe = subprocess.run(
+                [FFPROBE_BINARY, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("FFprobe is missing. Install FFmpeg and ffprobe, or run the provided Docker image.") from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Could not inspect the generated narration. Check the FFmpeg installation and try again.") from None
+        if probe.returncode != 0:
+            raise RuntimeError("Could not read the generated voiceover duration. Check that ffprobe is installed.")
+        try:
+            audio_duration = float(probe.stdout.strip())
+        except ValueError:
+            raise RuntimeError("The generated voiceover has an invalid duration.") from None
+        if audio_duration < 1:
+            raise RuntimeError("The generated voiceover is too short to render.")
+        word_counts = [max(len(scene["copy"].split()), 1) for scene in scenes]
+        total_words = sum(word_counts)
+        durations = [max(2.5, audio_duration * count / total_words) for count in word_counts]
+        scale = audio_duration / sum(durations)
+        durations = [duration * scale for duration in durations]
+        args = [FFMPEG_BINARY, "-hide_banner", "-loglevel", "error", "-y"]
+        image_paths = []
+        for index, (scene, duration) in enumerate(zip(scenes, durations)):
+            image_path = temp / f"scene-{index:02d}.png"
+            render_scene_card(image_path, scene, index, pack["topic"], vertical)
+            image_paths.append(image_path)
+            args.extend(["-loop", "1", "-framerate", "30", "-t", f"{duration:.3f}", "-i", str(image_path)])
+        args.extend(["-i", str(audio_path)])
+        filters = []
+        labels = []
+        for index, duration in enumerate(durations):
+            filters.append(f"[{index}:v]scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1,format=yuv420p,trim=duration={duration:.3f},setpts=PTS-STARTPTS[v{index}]")
+            labels.append(f"[v{index}]")
+        filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
+        audio_index = len(image_paths)
+        args.extend(["-filter_complex", ";".join(filters), "-map", "[outv]", "-map", f"{audio_index}:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(output_path)])
+        try:
+            render = subprocess.run(args, capture_output=True, text=True, timeout=max(300, int(audio_duration * 8)))
+        except FileNotFoundError:
+            raise RuntimeError("FFmpeg is missing. Install FFmpeg and ffprobe, or run the provided Docker image.") from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Video rendering took too long and was stopped. Try a shorter script.") from None
+        if render.returncode != 0:
+            raise RuntimeError("FFmpeg could not render this pack. Check the FFmpeg installation and try again.")
+
+
 def recommendations(data: dict[str, Any]) -> list[dict[str, str]]:
     views = data["totals"]["views"]
     mins = data["totals"]["minutes"]
@@ -251,6 +431,19 @@ def studio(request: Request):
         "request": request, "packs": get_content_packs(), "result": None,
         "error": request.session.pop("studio_error", None),
         "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL),
+        "rendered_id": request.query_params.get("rendered"),
+    })
+
+
+@app.get("/studio/{pack_id}", response_class=HTMLResponse)
+def open_content_pack(request: Request, pack_id: int):
+    with connect_db() as db:
+        row = db.execute("SELECT * FROM content_packs WHERE id=?", (pack_id,)).fetchone()
+    if not row:
+        return RedirectResponse("/studio", status_code=303)
+    return templates.TemplateResponse("studio.html", {
+        "request": request, "packs": get_content_packs(), "result": dict(row),
+        "error": None, "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL), "rendered_id": None,
     })
 
 
@@ -282,6 +475,42 @@ def download_content_pack(pack_id: int):
         return RedirectResponse("/studio", status_code=303)
     filename = f"creatorflow-pack-{pack_id}.md"
     return Response(pack["body"], media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.post("/studio/{pack_id}/render", response_class=HTMLResponse)
+def render_content_video(request: Request, pack_id: int):
+    with connect_db() as db:
+        row = db.execute("SELECT * FROM content_packs WHERE id=?", (pack_id,)).fetchone()
+    if not row:
+        return RedirectResponse("/studio", status_code=303)
+    pack = dict(row)
+    output_name = f"creatorflow-{pack_id}.mp4"
+    output_path = VIDEO_OUTPUT_DIR / output_name
+    try:
+        render_video(pack, output_path)
+        with connect_db() as db:
+            db.execute("UPDATE content_packs SET video_file=? WHERE id=?", (output_name, pack_id))
+        pack["video_file"] = output_name
+        error = None
+    except RuntimeError as exc:
+        error = str(exc)
+    return templates.TemplateResponse("studio.html", {
+        "request": request, "packs": get_content_packs(), "result": pack,
+        "error": error, "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL), "rendered_id": str(pack_id) if not error else None,
+    })
+
+
+@app.get("/studio/{pack_id}/video")
+def download_rendered_video(pack_id: int):
+    from fastapi.responses import FileResponse
+    with connect_db() as db:
+        row = db.execute("SELECT video_file FROM content_packs WHERE id=?", (pack_id,)).fetchone()
+    if not row or not row["video_file"]:
+        return RedirectResponse("/studio", status_code=303)
+    video_path = (VIDEO_OUTPUT_DIR / row["video_file"]).resolve()
+    if video_path.parent != VIDEO_OUTPUT_DIR or not video_path.is_file():
+        return RedirectResponse("/studio", status_code=303)
+    return FileResponse(video_path, media_type="video/mp4", filename=f"creatorflow-{pack_id}.mp4")
 
 
 @app.get("/auth/start")

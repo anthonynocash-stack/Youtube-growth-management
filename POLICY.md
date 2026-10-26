@@ -10,7 +10,7 @@ CreatorFlow is designed to support compliant channel operations, but it cannot c
 4. **Rights and disclosure.** Creators must own or license their assets, avoid impersonation, and make required synthetic/altered-content disclosures.
 5. **Human approval.** A person reviews the final script, footage, title, description, thumbnail, sponsorship disclosures, audience settings, and upload. There is no unattended publish action.
 6. **No monetization promise.** Analytics estimates and recommendations cannot guarantee eligibility, ad suitability, revenue, or continued monetization.
-7. **AI is a drafting tool.** Generated scripts and production packs may include errors, clichés, or material that needs rights review. A creator must add authentic perspective, verify claims, and make required disclosures; generated content should not be published as interchangeable bulk output.
+7. **AI is a production aid.** Generated scripts, synthetic narration, and visual cards may include errors, clichés, or material that needs rights review. A creator must add authentic perspective, verify claims, and make required disclosures; generated content should not be published as interchangeable bulk output. Review whether the video's synthetic narration or other altered media needs disclosure.
 
 ## Official references
 
