@@ -439,7 +439,7 @@ def dashboard(request: Request):
     ideas = get_ideas()
     autopilot_profile = get_autopilot_profile()
     upload_authorized = bool(creds and creds.has_scopes([UPLOAD_SCOPE]))
-    return templates.TemplateResponse("dashboard.html", {
+    return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "request": request, "data": data, "ideas": ideas,
         "recommendations": recommendations(data), "error": error,
         "configured": bool(CLIENT_CONFIG["web"]["client_id"] and CLIENT_CONFIG["web"]["client_secret"]),
@@ -455,7 +455,7 @@ def dashboard(request: Request):
 
 @app.get("/studio", response_class=HTMLResponse)
 def studio(request: Request):
-    return templates.TemplateResponse("studio.html", {
+    return templates.TemplateResponse(request=request, name="studio.html", context={
         "request": request, "packs": get_content_packs(), "result": None,
         "error": request.session.pop("studio_error", None),
         "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL),
@@ -469,7 +469,7 @@ def open_content_pack(request: Request, pack_id: int):
         row = db.execute("SELECT * FROM content_packs WHERE id=?", (pack_id,)).fetchone()
     if not row:
         return RedirectResponse("/studio", status_code=303)
-    return templates.TemplateResponse("studio.html", {
+    return templates.TemplateResponse(request=request, name="studio.html", context={
         "request": request, "packs": get_content_packs(), "result": dict(row),
         "error": None, "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL), "rendered_id": None,
     })
@@ -482,16 +482,16 @@ def studio_generate(request: Request, topic: str = Form(...), audience: str = Fo
     viewer_value = viewer_value.strip()[:500]
     if not topic:
         error = "Add a topic to generate a production pack."
-        return templates.TemplateResponse("studio.html", {"request": request, "packs": get_content_packs(), "result": None, "error": error, "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL)})
+        return templates.TemplateResponse(request=request, name="studio.html", context={"request": request, "packs": get_content_packs(), "result": None, "error": error, "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL)})
     try:
         body = generate_content_pack(topic, audience, viewer_value, video_format[:40], duration[:40])
         with connect_db() as db:
             cursor = db.execute("INSERT INTO content_packs(topic,format,audience,duration,body) VALUES(?,?,?,?,?)", (topic, video_format[:40], audience, duration[:40], body))
             pack_id = cursor.lastrowid
         result = {"id": pack_id, "topic": topic, "format": video_format, "audience": audience, "duration": duration, "body": body}
-        return templates.TemplateResponse("studio.html", {"request": request, "packs": get_content_packs(), "result": result, "error": None, "configured": True})
+        return templates.TemplateResponse(request=request, name="studio.html", context={"request": request, "packs": get_content_packs(), "result": result, "error": None, "configured": True})
     except RuntimeError as exc:
-        return templates.TemplateResponse("studio.html", {"request": request, "packs": get_content_packs(), "result": None, "error": str(exc), "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL)})
+        return templates.TemplateResponse(request=request, name="studio.html", context={"request": request, "packs": get_content_packs(), "result": None, "error": str(exc), "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL)})
 
 
 @app.get("/studio/{pack_id}/download")
@@ -522,7 +522,7 @@ def render_content_video(request: Request, pack_id: int):
         error = None
     except RuntimeError as exc:
         error = str(exc)
-    return templates.TemplateResponse("studio.html", {
+    return templates.TemplateResponse(request=request, name="studio.html", context={
         "request": request, "packs": get_content_packs(), "result": pack,
         "error": error, "configured": bool(AI_API_BASE_URL and AI_API_KEY and AI_MODEL), "rendered_id": str(pack_id) if not error else None,
     })
