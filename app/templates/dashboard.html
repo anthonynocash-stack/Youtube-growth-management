@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A policy-aware workspace for original YouTube growth.">
+  <title>CreatorFlow — Channel workspace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark">C</span><span>creator<span class="brand-light">flow</span></span></a>
+    <div class="side-label">WORKSPACE</div>
+    <a class="nav active" href="#overview"><span>◫</span> Overview</a>
+    <a class="nav" href="#insights"><span>⌁</span> Growth insights</a>
+    <a class="nav" href="#planner"><span>▤</span> Content planner</a>
+    <a class="nav" href="/studio"><span>✧</span> Create content</a>
+    <div class="sidebar-bottom"><div class="policy-mini"><span class="shield">✓</span><div><b>Creator-first growth</b><small>Policy guardrails on</small></div></div><div class="user-chip"><div class="avatar">CF</div><div><b>Channel workspace</b><small>Single operator</small></div></div></div>
+  </aside>
+  <main class="main" id="overview">
+    <header class="topbar"><div class="crumb">Workspace <span>/</span> Overview</div><div class="top-actions"><a class="button button-outline" href="/studio">✧ Create a video</a><span class="status"><i></i>{% if data.connected %}YouTube connected{% else %}Demo workspace{% endif %}</span>{% if data.connected %}<form action="/auth/disconnect" method="post"><button class="button button-quiet" type="submit">Disconnect</button></form>{% else %}<a class="button button-dark" href="/auth/start">Connect YouTube <span>↗</span></a>{% endif %}</div></header>
+    <section class="welcome"><div><div class="eyebrow">YOUR CHANNEL, WITH A PLAN</div><h1>Make every upload <em>count.</em></h1><p>Learn what viewers respond to, plan original videos, and grow at a pace that lasts.</p></div><div class="welcome-art"><div class="art-ring ring-one"></div><div class="art-ring ring-two"></div><div class="play-icon">▶</div><div class="spark spark-a">✳</div><div class="spark spark-b">✦</div></div></section>
+    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+    {% if not data.connected %}<div class="demo-note"><span>ⓘ</span><div><b>You're viewing sample data.</b> Connect your channel to see real performance. Demo numbers are illustrative.</div>{% if not configured %}<small>Set up Google OAuth in <code>.env</code> first.</small>{% endif %}</div>{% endif %}
+    <div class="channel-line"><div class="channel-avatar">▶</div><div><b>{{ data.channel.title }}</b><small>{% if data.connected %}Last 28 days · Updated from YouTube Analytics{% else %}Connect your channel for private analytics{% endif %}</small></div><span class="period">Last 28 days <span>⌄</span></span></div>
+    <section class="metrics">
+      <article class="metric"><div class="metric-top"><span>Views</span><span class="metric-icon purple">◉</span></div><strong>{{ "{:,.0f}".format(data.totals.views) }}</strong><small class="muted">Total views in period</small></article>
+      <article class="metric"><div class="metric-top"><span>Watch time</span><span class="metric-icon coral">◷</span></div><strong>{{ "{:,.0f}".format(data.totals.minutes / 60) }}<i> hrs</i></strong><small class="muted">Hours watched</small></article>
+      <article class="metric"><div class="metric-top"><span>Net subscribers</span><span class="metric-icon mint">↗</span></div><strong>{% if data.totals.subs > 0 %}+{% endif %}{{ "{:,.0f}".format(data.totals.subs) }}</strong><small class="muted">Gained minus lost</small></article>
+      <article class="metric"><div class="metric-top"><span>Avg. view duration</span><span class="metric-icon gold">◴</span></div><strong>{{ (data.totals.avg_view // 60) }}<i>m</i> {{ (data.totals.avg_view % 60) }}<i>s</i></strong><small class="muted">Across daily reporting</small></article>
+    </section>
+    <section class="content-grid" id="insights">
+      <article class="panel chart-panel"><div class="panel-heading"><div><div class="eyebrow">PERFORMANCE</div><h2>Your views, day by day</h2></div><span class="chart-legend"><i></i> Views</span></div><div class="chart-wrap"><div class="y-labels"><span>4k</span><span>3k</span><span>2k</span><span>1k</span><span>0</span></div><div class="chart" id="views-chart" data-series='{{ data.series | tojson }}'><div class="grid-lines"><i></i><i></i><i></i><i></i><i></i></div><svg viewBox="0 0 700 205" preserveAspectRatio="none" aria-label="Views chart"><defs><linearGradient id="area" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#7966f5" stop-opacity=".24"/><stop offset="1" stop-color="#7966f5" stop-opacity="0"/></linearGradient></defs><path class="area-path"/><path class="line-path"/></svg><div class="x-labels"></div></div></div><div class="chart-foot">Use patterns as clues. A view spike is not proof that one change caused growth.</div></article>
+      <article class="panel insight-panel"><div class="panel-heading"><div><div class="eyebrow">NEXT BEST MOVES</div><h2>Growth insights</h2></div><span class="magic">✳</span></div><div class="insight-list">{% for item in recommendations %}<div class="insight"><span class="insight-dot">0{{ loop.index }}</span><div><b>{{ item.title }}</b><p>{{ item.body }}</p></div></div>{% endfor %}</div><div class="guardrail"><span>✓</span> Suggestions support original content and authentic viewer interest.</div></article>
+    </section>
+    <section class="planner-section" id="planner"><div class="section-heading"><div><div class="eyebrow">IDEAS TO UPLOAD</div><h2>Content planner</h2><p>Keep the next useful video moving. Every idea stays in your hands.</p></div><button class="button button-dark" id="add-idea-btn">＋ Add an idea</button></div>
+      <div class="planner-layout"><div class="idea-list">{% if ideas %}{% for idea in ideas %}<article class="idea-card"><div class="idea-main"><span class="idea-date">{% if idea.target_date %}{{ idea.target_date[5:] }}{% else %}—{% endif %}</span><div><h3>{{ idea.title }}</h3><p>{% if idea.audience %}For {{ idea.audience }}{% endif %}{% if idea.viewer_value %} · {{ idea.viewer_value }}{% endif %}</p></div></div><form action="/ideas/{{ idea.id }}/status" method="post"><select name="status" onchange="this.form.submit()">{% for status in ["Idea","Draft","Review","Published"] %}<option {% if idea.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></form></article>{% endfor %}{% else %}<div class="empty-state"><div class="empty-icon">✎</div><b>Your next great video starts here.</b><span>Add a viewer question, idea, or lesson you can make uniquely yours.</span><button class="button button-outline" id="empty-add">Add your first idea</button></div>{% endif %}</div>
+        <aside class="planner-side"><div class="side-card"><div class="side-card-icon">✦</div><b>Make it yours</b><p>Before you make a video, write down what original insight or experience makes it worth a viewer's time.</p></div><div class="side-card safety"><div class="side-card-icon">✓</div><b>Publish with care</b><p>Check accuracy, rights, disclosure, and that the final video delivers what its title promises.</p><a href="/static/policy.md" target="_blank">Review creator guardrails ↗</a></div></aside></div>
+    </section>
+    <footer>CreatorFlow · Built for thoughtful, original creation <span>Growth takes time. No outcomes are guaranteed.</span></footer>
+  </main>
+  <dialog id="idea-dialog"><form action="/ideas" method="post"><div class="dialog-head"><div><div class="eyebrow">CONTENT PLANNER</div><h2>Add a video idea</h2></div><button type="button" class="close" id="close-dialog">×</button></div><label>Video idea<input name="title" required maxlength="160" placeholder="What will this video help someone do?"></label><label>Who is it for?<input name="audience" maxlength="240" placeholder="e.g. first-time home gardeners"></label><label>What original value will you add?<textarea name="viewer_value" maxlength="500" rows="3" placeholder="A lesson, demonstration, point of view, or experience only you can bring"></textarea></label><label>Target date<input type="date" name="target_date"></label><div class="dialog-actions"><button type="button" class="button button-quiet" id="cancel-dialog">Cancel</button><button class="button button-dark" type="submit">Save idea</button></div></form></dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>
