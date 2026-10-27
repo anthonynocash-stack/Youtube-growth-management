@@ -76,6 +76,10 @@ def connect_db() -> sqlite3.Connection:
 def init_db() -> None:
     with connect_db() as db:
         db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        db.execute("""CREATE TABLE IF NOT EXISTS oauth_flows (
+            state TEXT PRIMARY KEY, code_verifier TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
         db.execute("""CREATE TABLE IF NOT EXISTS ideas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL, audience TEXT NOT NULL DEFAULT '',
@@ -117,6 +121,25 @@ def get_setting(key: str) -> str | None:
 def save_setting(key: str, value: str) -> None:
     with connect_db() as db:
         db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def store_oauth_code_verifier(state: str, verifier: str) -> None:
+    with connect_db() as db:
+        db.execute("DELETE FROM oauth_flows WHERE created_at < datetime('now', '-15 minutes')")
+        db.execute(
+            "INSERT OR REPLACE INTO oauth_flows(state, code_verifier) VALUES(?, ?)",
+            (state, verifier),
+        )
+
+
+def take_oauth_code_verifier(state: str) -> str | None:
+    with connect_db() as db:
+        row = db.execute(
+            "SELECT code_verifier FROM oauth_flows WHERE state = ? AND created_at >= datetime('now', '-15 minutes')",
+            (state,),
+        ).fetchone()
+        db.execute("DELETE FROM oauth_flows WHERE state = ?", (state,))
+    return row["code_verifier"] if row else None
 
 
 def load_credentials() -> Credentials | None:
@@ -721,8 +744,9 @@ def auth_start(request: Request):
     if not CLIENT_CONFIG["web"]["client_id"] or not CLIENT_CONFIG["web"]["client_secret"]:
         request.session["oauth_error"] = "Add Google OAuth credentials to .env before connecting."
         return RedirectResponse("/", status_code=303)
-    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=READ_SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
+    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=READ_SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0], autogenerate_code_verifier=True)
     url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
+    store_oauth_code_verifier(state, flow.code_verifier)
     request.session["oauth_state"] = state
     request.session["oauth_scopes"] = READ_SCOPES
     return RedirectResponse(url, status_code=302)
@@ -736,7 +760,7 @@ def auth_upload(request: Request):
     if not CLIENT_CONFIG["web"]["client_id"] or not CLIENT_CONFIG["web"]["client_secret"]:
         request.session["oauth_error"] = "Add Google OAuth credentials to .env before connecting."
         return RedirectResponse("/#autopilot", status_code=303)
-    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=UPLOAD_SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
+    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=UPLOAD_SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0], autogenerate_code_verifier=True)
     url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     request.session["oauth_state"] = state
     request.session["oauth_scopes"] = UPLOAD_SCOPES
@@ -750,8 +774,16 @@ def auth_callback(request: Request, state: str = "", code: str = "", error: str 
     if error or not expected or state != expected:
         request.session["oauth_error"] = "Google sign-in was cancelled or its security state did not match. Please try again."
         return RedirectResponse("/", status_code=303)
+    code_verifier = take_oauth_code_verifier(expected)
+    if not code_verifier:
+        request.session["oauth_error"] = "The Google sign-in session expired. Start the connection again."
+        return RedirectResponse("/", status_code=303)
     try:
-        flow = Flow.from_client_config(CLIENT_CONFIG, scopes=scopes, state=state, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
+        flow = Flow.from_client_config(
+            CLIENT_CONFIG, scopes=scopes, state=state,
+            redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0],
+            code_verifier=code_verifier, autogenerate_code_verifier=False,
+        )
         flow.fetch_token(code=code)
         save_setting("google_credentials", flow.credentials.to_json())
     except Exception as exc:
