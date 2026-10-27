@@ -754,8 +754,10 @@ def auth_callback(request: Request, state: str = "", code: str = "", error: str 
         flow = Flow.from_client_config(CLIENT_CONFIG, scopes=scopes, state=state, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
         flow.fetch_token(code=code)
         save_setting("google_credentials", flow.credentials.to_json())
-    except Exception:
-        request.session["oauth_error"] = "Google sign-in could not be completed. Check OAuth setup and try again."
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("Google OAuth callback failed")
+        request.session["oauth_error"] = f"Google sign-in failed ({type(exc).__name__}). See the PowerShell window for details."
     return RedirectResponse("/", status_code=303)
 
 
