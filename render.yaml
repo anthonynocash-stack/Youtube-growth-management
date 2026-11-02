@@ -16,10 +16,6 @@ services:
         value: production
       - key: SESSION_SECRET
         generateValue: true
-      - key: APP_ACCESS_USERNAME
-        sync: false
-      - key: APP_ACCESS_PASSWORD
-        sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
