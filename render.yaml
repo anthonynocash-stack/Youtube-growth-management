@@ -2,7 +2,7 @@ services:
   - type: web
     name: creatorflow-youtube-automation
     runtime: docker
-    plan: starter
+    plan: 1c-2g
     region: frankfurt
     numInstances: 1
     healthCheckPath: /health
@@ -16,6 +16,10 @@ services:
         value: production
       - key: SESSION_SECRET
         generateValue: true
+      - key: APP_ACCESS_USERNAME
+        sync: false
+      - key: APP_ACCESS_PASSWORD
+        sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
