@@ -2,7 +2,7 @@
 
 CreatorFlow is an open-source, policy-aware YouTube channel operations workspace. It connects to a creator's own YouTube account, summarizes performance, organizes original video ideas, and turns analytics into practical experiments for improving audience retention and discovery.
 
-It does **not** promise or manufacture subscribers, views, watch time, or revenue. It has no bots, engagement exchanges, view buying, comment spam, scraped content pipeline, or unattended publishing. Growth suggestions are hypotheses; creators decide what to make and publish.
+It does **not** promise or manufacture subscribers, views, watch time, or revenue. It has no bots, engagement exchanges, view buying, comment spam, or scraped-content pipeline. Its optional Autopilot can publish unattended only after the channel owner explicitly authorizes upload access, selects publishing settings, and enables it. Growth suggestions are hypotheses, not guarantees.
 
 ## What is included
 
@@ -72,8 +72,8 @@ The renderer creates an MP4 with generated narration and original visual cards b
 - Never buy, exchange, automate, or incentivize views, likes, comments, subscribers, or watch time.
 - Do not mass-produce near-identical videos or reuse other creators' work with only superficial changes.
 - Disclose altered or synthetic media when YouTube requires it; respect copyright, privacy, and community guidelines.
-- Keep a human in the loop for scripts, thumbnails, metadata, sponsorship claims, and every upload.
-- Rendered videos use an AI voiceover and original designed visual cards. They are draft assets, not verified facts or a substitute for original footage. Verify claims and sources, personalize the creator's perspective, replace cards where footage would add value, and review synthetic-media disclosure requirements before publishing.
+- Autopilot does not request per-video approval while enabled. The channel owner is responsible for configuring the channel profile, visibility, audience setting, upload cadence, rights, disclosures, and ongoing monitoring; disable Autopilot whenever its output or settings are no longer appropriate.
+- Rendered videos use an AI voiceover and original designed visual cards. They may contain errors and are not verified facts or a substitute for original footage. The owner should configure a distinctive channel perspective, use original or licensed assets, and ensure factual claims and required disclosures are handled appropriately before authorizing unattended publishing.
 - No tool can guarantee YouTube policy compliance, monetization approval, audience growth, or revenue.
 
 See [POLICY.md](POLICY.md), [SECURITY.md](SECURITY.md), and [docs/roadmap.md](docs/roadmap.md).
