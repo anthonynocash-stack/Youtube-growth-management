@@ -213,6 +213,27 @@ def get_content_packs() -> list[dict[str, Any]]:
         return [dict(row) for row in db.execute("SELECT id,topic,format,audience,duration,created_at,video_file,youtube_video_id FROM content_packs ORDER BY id DESC LIMIT 12")]
 
 
+def runtime_word_bounds(duration: str, video_format: str = "") -> tuple[int, int]:
+    if "short" in video_format.lower() or "30-60" in duration:
+        return (90, 150)
+    value = duration.lower()
+    if "3-5" in value: return (390, 650)
+    if "6-8" in value: return (780, 1040)
+    if "10-15" in value: return (1300, 1950)
+    if "20+" in value: return (2600, 3900)
+    return (780, 1040)
+
+
+def runtime_min_seconds(duration: str, video_format: str = "") -> int:
+    if "short" in video_format.lower() or "30-60" in duration: return 30
+    value = duration.lower()
+    if "3-5" in value: return 180
+    if "6-8" in value: return 360
+    if "10-15" in value: return 600
+    if "20+" in value: return 1200
+    return 360
+
+
 def generate_content_pack(topic: str, audience: str, viewer_value: str, video_format: str, duration: str) -> str:
     if not (AI_API_BASE_URL and AI_API_KEY and AI_MODEL):
         raise RuntimeError("Configure AI_API_BASE_URL, AI_API_KEY, and AI_MODEL in .env to generate content.")
@@ -228,7 +249,7 @@ Return a complete, production-ready Markdown pack with these sections:
 1. Creative brief (promise, original angle, assumptions to personalize)
 2. Three honest title options (accurate, no misleading clickbait)
 3. Thumbnail concept and a text-to-image prompt using original, non-infringing elements
-4. Full spoken script with a compelling but truthful opening, clear sections, transitions, and a useful ending; pace it to the runtime and include approximate timestamps
+4. Full spoken script with a compelling but truthful opening, clear sections, transitions, and a useful ending; meet the mandatory spoken-word target. Put ONLY words intended to be spoken in this section. Never include recording tips, narrator directions, camera instructions, scene labels, storyboard notes, timestamps, or bracketed stage directions inside the spoken script
 5. Scene-by-scene storyboard (time, visuals/B-roll to create or license, on-screen text, narration)
 6. Description, a small relevant tag list, and chapters that match the script
 7. Shorts cut-down: a distinct 30-60 second excerpt with hook, payoff, and caption
@@ -253,7 +274,30 @@ Write for this one topic and audience, not as interchangeable mass-produced cont
         body = result["choices"][0]["message"]["content"]
         if not isinstance(body, str) or not body.strip():
             raise RuntimeError("The AI provider returned an empty content pack.")
-        return body.strip()
+        body = body.strip()
+        minimum, maximum = runtime_word_bounds(duration, video_format)
+        spoken_words = len(script_from_pack(body).split())
+        if spoken_words < int(minimum * 0.88):
+            retry_payload = json.dumps({
+                "model": AI_MODEL,
+                "messages": [
+                    {"role": "system", "content": "You are a precise long-form scriptwriter. Meet the exact spoken-word requirement. Output the complete production pack, and keep production directions out of the spoken script."},
+                    {"role": "user", "content": prompt + f"\n\nIMPORTANT RETRY: The previous script contained only {spoken_words} spoken words. Rewrite the complete pack and provide at least {minimum} spoken words and no more than {maximum}. Do not pad with repetition."},
+                ],
+                "temperature": 0.65,
+            }).encode("utf-8")
+            retry_req = urllib.request.Request(
+                AI_API_BASE_URL + "/chat/completions", data=retry_payload,
+                headers={"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(retry_req, timeout=240) as response:
+                retry_result = json.loads(response.read().decode("utf-8"))
+            retry_body = retry_result["choices"][0]["message"]["content"]
+            retry_words = len(script_from_pack(retry_body).split())
+            if retry_words < int(minimum * 0.88):
+                raise RuntimeError(f"The AI provider returned only {retry_words} spoken words for a {duration} video. Try again or use a provider/model with a larger output limit.")
+            return retry_body.strip()
+        return body
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"AI provider returned HTTP {exc.code}. Check the provider URL, model, and API key.") from None
     except urllib.error.URLError:
@@ -267,15 +311,16 @@ def script_from_pack(body: str) -> str:
     section = match.group(1) if match else body
     cleaned = re.sub(r"^\s*#{1,6}\s*.*$", "", section, flags=re.M)
     cleaned = re.sub(r"^\s*\*\*[^\n]+\*\*\s*$", "", cleaned, flags=re.M)
+    cleaned = re.sub(r"^\s*(?:tips for recording|recording tips|narrator tone|production notes?|visual direction|camera direction|b-roll|on-screen text|sound effects?|music cue|storyboard|scene-by-scene|timestamp|time\s*\|).*$", "", cleaned, flags=re.I | re.M)
+    cleaned = re.sub(r"^\s*(?:scene\s+\d+|visuals?\s*:|narration\s*:|voiceover\s*:|camera\s*:).*$", "", cleaned, flags=re.I | re.M)
+    cleaned = re.sub(r"\[[^\]]*(?:pause|cut to|fade|music|camera|visual|b-roll|on screen)[^\]]*\]", "", cleaned, flags=re.I)
     cleaned = re.sub(r"\b\d{1,2}:\d{2}(?:\s*[-–—]\s*\d{1,2}:\d{2})?\b", "", cleaned)
     cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
-    cleaned = re.sub(r"[*_`>#]", "", cleaned)
+    cleaned = re.sub(r"[*_#>]", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if len(cleaned.split()) < 30:
-        raise RuntimeError("This pack does not contain enough spoken script to render. Regenerate it with a complete script first.")
+        raise RuntimeError("This pack does not contain enough spoken script to render. Regenerate it with a complete spoken script first.")
     return cleaned
-
-
 def make_scenes(script: str, title: str) -> list[dict[str, str]]:
     paragraphs = [re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", p).strip() for p in re.split(r"\n\s*\n", script) if p.strip()]
     words = " ".join(paragraphs).split()
@@ -316,43 +361,66 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> lis
 
 def render_scene_card(path: Path, scene: dict[str, str], index: int, seed: str, vertical: bool = False) -> None:
     width, height = (720, 1280) if vertical else (1280, 720)
-    palettes = [(31, 29, 58), (37, 43, 68), (35, 48, 60), (49, 39, 67), (31, 48, 56)]
-    base = palettes[(index + sum(seed.encode("utf-8"))) % len(palettes)]
-    image = Image.new("RGB", (width, height), base)
+    palettes = [((15, 24, 43), (47, 58, 83)), ((25, 24, 48), (76, 53, 76)), ((17, 42, 48), (54, 82, 82)), ((39, 28, 48), (86, 57, 70))]
+    top, bottom = palettes[(index + sum(seed.encode("utf-8"))) % len(palettes)]
+    image = Image.new("RGB", (width, height))
     draw = ImageDraw.Draw(image, "RGBA")
-    accent = (153, 136, 255, 210)
-    if vertical:
-        draw.ellipse((410, -140, 850, 300), outline=(*accent[:3], 42), width=3)
-        draw.ellipse((465, -85, 795, 245), outline=(*accent[:3], 54), width=2)
-        draw.rounded_rectangle((42, 62, 270, 105), radius=18, fill=(255, 255, 255, 20), outline=(255, 255, 255, 30))
-        draw.text((56, 75), "CREATORFLOW  /  ORIGINAL", font=load_font(13, True), fill=(222, 218, 255, 255))
-        draw.text((44, 165), scene["label"], font=load_font(16, True), fill=(183, 174, 255, 255))
-        text_y, font_size, max_width, max_lines = 285, 35, 625, 12
-        progress_y, footer_y = 1140, 1170
+    for y in range(height):
+        t = y / max(height - 1, 1)
+        color = tuple(int(top[c] * (1-t) + bottom[c] * t) for c in range(3))
+        draw.line((0, y, width, y), fill=color)
+    text = scene["copy"].lower()
+    cx, horizon = int(width * 0.73), int(height * 0.64)
+    # Original scene-specific vector illustrations; these are not stock photographs.
+    if any(k in text for k in ("letter", "envelope", "note", "written", "paper")):
+        draw.ellipse((cx-210, horizon-210, cx+210, horizon+210), fill=(255, 207, 144, 22))
+        draw.rounded_rectangle((cx-150, horizon-105, cx+150, horizon+105), radius=18, fill=(235, 221, 194, 245), outline=(255,255,255,180), width=4)
+        draw.polygon([(cx-150,horizon-105),(cx,horizon+8),(cx+150,horizon-105)], fill=(184,145,123,255))
+        draw.line((cx-95,horizon+42,cx+95,horizon+42), fill=(95,75,78,180), width=5)
+        draw.line((cx-95,horizon+65,cx+55,horizon+65), fill=(95,75,78,140), width=4)
+    elif any(k in text for k in ("midnight", "night", "moon", "dark", "stars")):
+        draw.ellipse((cx-105, 90, cx+105, 300), fill=(255,231,184,235))
+        for j in range(24):
+            sx, sy = (index*97+j*137)%width, (j*71+42)%max(1,int(height*.48))
+            draw.ellipse((sx,sy,sx+5,sy+5), fill=(255,255,230,180))
+        for j in range(6):
+            bx, bh = (j*150+25)%width, 130+(j*53%180)
+            draw.rectangle((bx,horizon-bh,bx+95,horizon), fill=(10,17,32,230))
+            for wy in range(horizon-bh+20,horizon-10,34):
+                for wx in range(bx+18,bx+80,30):
+                    draw.rectangle((wx,wy,wx+9,wy+13), fill=(255,205,119,125))
+    elif any(k in text for k in ("door", "stranger", "knock", "visitor", "room", "house")):
+        draw.rectangle((cx-125,horizon-290,cx+125,height), fill=(22,27,43,245), outline=(223,190,139,220), width=8)
+        draw.ellipse((cx+76,horizon-150,cx+92,horizon-134), fill=(255,211,129,255))
+        draw.ellipse((cx-220,horizon-245,cx-145,horizon-170), fill=(12,17,30,255))
+        draw.polygon([(cx-250,horizon-175),(cx-112,horizon-175),(cx-82,height),(cx-285,height)], fill=(12,17,30,245))
+    elif any(k in text for k in ("road", "journey", "walk", "street", "travel", "path")):
+        draw.polygon([(cx-210,height),(cx-30,horizon),(cx+30,horizon),(cx+235,height)], fill=(27,31,45,255))
+        draw.line((cx,horizon+35,cx+18,height), fill=(240,210,150,200), width=7)
+        draw.ellipse((cx-34,horizon-100,cx+34,horizon-32), fill=(255,218,154,230))
     else:
-        draw.ellipse((890, -220, 1450, 340), outline=(*accent[:3], 42), width=3)
-        draw.ellipse((965, -155, 1375, 255), outline=(*accent[:3], 54), width=2)
-        draw.rounded_rectangle((76, 65, 250, 105), radius=18, fill=(255, 255, 255, 20), outline=(255, 255, 255, 30))
-        draw.text((94, 75), "CREATORFLOW  /  ORIGINAL", font=load_font(14, True), fill=(222, 218, 255, 255))
-        draw.text((78, 156), scene["label"], font=load_font(18, True), fill=(183, 174, 255, 255))
-        text_y, font_size, max_width, max_lines = 225, 38, 940, 4
-        progress_y, footer_y = 602, 632
-    body = scene["copy"]
-    if len(body) > 185:
-        body = body[:182].rsplit(" ", 1)[0] + "…"
-    lines = wrap_text(draw, body, load_font(font_size, True), max_width)[:max_lines]
-    y = text_y
+        draw.ellipse((cx-180,horizon-250,cx+180,horizon+110), fill=(190,177,255,22))
+        draw.ellipse((cx-48,horizon-210,cx+48,horizon-114), fill=(18,22,37,255))
+        draw.polygon([(cx-90,horizon-112),(cx+90,horizon-112),(cx+145,height),(cx-145,height)], fill=(18,22,37,245))
+        draw.ellipse((cx-260,horizon-300,cx+260,horizon+220), outline=(255,255,255,35), width=3)
+    left = 42 if vertical else 78
+    panel_top, panel_bottom = (300, height-105) if vertical else (90, height-82)
+    draw.rounded_rectangle((left,panel_top,width-left,panel_bottom), radius=24, fill=(8,12,24,112), outline=(255,255,255,35), width=2)
+    draw.text((left+26,panel_top+24), f"THE STORY  /  SCENE {index+1:02d}", font=load_font(15 if vertical else 17, True), fill=(196,185,255,255))
+    max_width = width - 2*left - 52
+    font_size = 30 if vertical else 34
+    lines = wrap_text(draw, scene["copy"], load_font(font_size, True), max_width)
+    max_lines = 10 if vertical else 5
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1].rsplit(" ",1)[0] + "…"
+    y = panel_top + (78 if vertical else 72)
     for line in lines:
-        draw.text((44 if vertical else 78, y), line, font=load_font(font_size, True), fill=(250, 249, 255, 255), stroke_width=0)
-        y += 51 if vertical else 57
-    bar_left = 44 if vertical else 78
-    bar_width = width - (88 if vertical else 156)
-    draw.rounded_rectangle((bar_left, progress_y, bar_left + bar_width, progress_y + 8), radius=4, fill=(255, 255, 255, 32))
-    draw.rounded_rectangle((bar_left, progress_y, bar_left + int(bar_width * ((index + 1) / max(index + 2, 2))), progress_y + 8), radius=4, fill=accent)
-    draw.text((bar_left, footer_y), f"SCENE {index + 1:02d}", font=load_font(17, True), fill=(194, 190, 220, 255))
+        draw.text((left+26,y), line, font=load_font(font_size, True), fill=(250,249,255,255))
+        y += font_size + 13
+    draw.rounded_rectangle((left,panel_bottom-24,width-left,panel_bottom-16), radius=4, fill=(255,255,255,48))
+    draw.rounded_rectangle((left,panel_bottom-24,left+int((width-2*left)*(index+1)/max(index+2,2)),panel_bottom-16), radius=4, fill=(164,145,255,240))
     image.save(path, format="PNG", optimize=True)
-
-
 def synthesize_narration(text: str, output_path: Path) -> None:
     if not (AI_API_BASE_URL and AI_API_KEY and AI_TTS_MODEL):
         raise RuntimeError("Set AI_TTS_MODEL in .env to enable voiceover generation with your configured AI provider.")
@@ -400,6 +468,9 @@ def render_video(pack: dict[str, Any], output_path: Path) -> None:
             raise RuntimeError("The generated voiceover has an invalid duration.") from None
         if audio_duration < 1:
             raise RuntimeError("The generated voiceover is too short to render.")
+        required_seconds = runtime_min_seconds(pack["duration"], pack["format"])
+        if audio_duration < required_seconds * 0.88:
+            raise RuntimeError(f"The narration is {int(audio_duration)} seconds, shorter than the selected {pack['duration']} runtime. The video was not rendered or uploaded; regenerate a fuller script.")
         word_counts = [max(len(scene["copy"].split()), 1) for scene in scenes]
         total_words = sum(word_counts)
         durations = [max(2.5, audio_duration * count / total_words) for count in word_counts]
@@ -416,7 +487,7 @@ def render_video(pack: dict[str, Any], output_path: Path) -> None:
         filters = []
         labels = []
         for index, duration in enumerate(durations):
-            filters.append(f"[{index}:v]scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1,format=yuv420p,trim=duration={duration:.3f},setpts=PTS-STARTPTS[v{index}]")
+            filters.append(f"[{index}:v]scale={frame_width}:{frame_height}:force_original_aspect_ratio=increase,crop={frame_width}:{frame_height},zoompan=z='min(zoom+0.00045,1.055)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={frame_width}x{frame_height}:fps=30,trim=duration={duration:.3f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v{index}]")
             labels.append(f"[v{index}]")
         filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
         audio_index = len(image_paths)
