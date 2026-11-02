@@ -36,6 +36,8 @@ Requirements: Python 3.11+, FFmpeg and ffprobe, a Google Cloud project with YouT
 
 Without OAuth credentials, the dashboard opens in demo mode. Demo values are labeled and are never sent to YouTube.
 
+For an always-on cloud deployment that continues while your computer is off, follow the [Render deployment guide](docs/deployment-render.md) and review the paid service and persistent-disk requirements.
+
 ## Configuration
 
 | Variable | Purpose |
