@@ -487,7 +487,8 @@ def render_video(pack: dict[str, Any], output_path: Path) -> None:
         filters = []
         labels = []
         for index, duration in enumerate(durations):
-            filters.append(f"[{index}:v]scale={frame_width}:{frame_height}:force_original_aspect_ratio=increase,crop={frame_width}:{frame_height},zoompan=z='min(zoom+0.00045,1.055)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={frame_width}x{frame_height}:fps=30,trim=duration={duration:.3f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v{index}]")
+            fade_out = max(0, duration - 0.28)
+            filters.append(f"[{index}:v]scale={frame_width}:{frame_height}:force_original_aspect_ratio=increase,crop={frame_width}:{frame_height},zoompan=z='min(zoom+0.00045,1.055)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={frame_width}x{frame_height}:fps=30,trim=duration={duration:.3f},setpts=PTS-STARTPTS,fade=t=in:st=0:d=0.22,fade=t=out:st={fade_out:.3f}:d=0.28,setsar=1,format=yuv420p[v{index}]")
             labels.append(f"[v{index}]")
         filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
         audio_index = len(image_paths)
