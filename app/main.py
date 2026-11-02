@@ -422,8 +422,29 @@ def render_scene_card(path: Path, scene: dict[str, str], index: int, seed: str, 
     draw.rounded_rectangle((left,panel_bottom-24,left+int((width-2*left)*(index+1)/max(index+2,2)),panel_bottom-16), radius=4, fill=(164,145,255,240))
     image.save(path, format="PNG", optimize=True)
 def synthesize_narration(text: str, output_path: Path) -> None:
+    tts_mode = AI_TTS_MODEL.strip().lower()
+    if tts_mode in {"windows-sapi", "local", "windows"}:
+        if os.name != "nt":
+            raise RuntimeError("Windows SAPI narration is available only when CreatorFlow runs on Windows.")
+        try:
+            import pyttsx3
+
+            engine = pyttsx3.init(driverName="sapi5")
+            engine.setProperty("rate", int(os.getenv("LOCAL_TTS_RATE", "165")))
+            engine.setProperty("volume", 1.0)
+            engine.save_to_file(text, str(output_path))
+            engine.runAndWait()
+            engine.stop()
+            if not output_path.is_file() or output_path.stat().st_size < 1024:
+                raise RuntimeError("Windows speech did not create a usable audio file. Check that a Windows speech voice is installed.")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Windows SAPI narration failed ({type(exc).__name__}). Check the installed Windows speech voices and try again.") from None
+        return
+
     if not (AI_API_BASE_URL and AI_API_KEY and AI_TTS_MODEL):
-        raise RuntimeError("Set AI_TTS_MODEL in .env to enable voiceover generation with your configured AI provider.")
+        raise RuntimeError("Set AI_TTS_MODEL to windows-sapi for free local Windows narration, or configure a cloud TTS model.")
     payload = json.dumps({"model": AI_TTS_MODEL, "voice": AI_TTS_VOICE, "input": text, "response_format": "mp3"}).encode("utf-8")
     req = urllib.request.Request(
         AI_API_BASE_URL + "/audio/speech", data=payload,
@@ -449,7 +470,8 @@ def render_video(pack: dict[str, Any], output_path: Path) -> None:
     VIDEO_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f"creatorflow-{pack['id']}-", dir=VIDEO_OUTPUT_DIR) as temp_dir:
         temp = Path(temp_dir)
-        audio_path = temp / "voiceover.mp3"
+        audio_extension = ".wav" if AI_TTS_MODEL.strip().lower() in {"windows-sapi", "local", "windows"} else ".mp3"
+        audio_path = temp / f"voiceover{audio_extension}"
         synthesize_narration(script, audio_path)
         try:
             probe = subprocess.run(
