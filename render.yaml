@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: creatorflow-youtube-automation
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    numInstances: 1
+    healthCheckPath: /health
+    dockerfilePath: ./Dockerfile
+    disk:
+      name: creatorflow-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: AI_API_BASE_URL
+        sync: false
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_MODEL
+        sync: false
+      - key: AI_TTS_MODEL
+        sync: false
+      - key: AI_TTS_VOICE
+        value: alloy
