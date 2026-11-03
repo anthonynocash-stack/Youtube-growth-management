@@ -8,3 +8,4 @@ google-api-python-client>=2.140,<3
 python-dotenv>=1.0,<2
 Pillow>=10,<13
 APScheduler>=3.10,<4
+pyttsx3>=2.99,<3

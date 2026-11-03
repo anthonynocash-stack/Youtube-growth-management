@@ -6,8 +6,8 @@
   <title>CreatorFlow — Channel workspace</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/app.css">
-  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/app.css?v=creatorflow3">
+  <link rel="stylesheet" href="/static/base.css?v=creatorflow3">
 </head>
 <body>
   <a class="skip-link" href="#overview">Skip to main content</a>
@@ -25,6 +25,14 @@
     <header class="topbar"><div class="crumb">Workspace <span>/</span> Overview</div><div class="top-actions"><a class="button button-outline" href="/studio">✧ Create a video</a><span class="status"><i></i>{% if data.connected %}YouTube connected{% else %}Demo workspace{% endif %}</span>{% if data.connected %}<form action="/auth/disconnect" method="post"><button class="button button-quiet" type="submit">Disconnect</button></form>{% elif terms_accepted %}<a class="button button-dark" href="/auth/start">Connect YouTube <span>↗</span></a>{% else %}<a class="button button-dark" href="#legal-gate">Review terms</a>{% endif %}</div></header>
     {% if not terms_accepted %}<section class="legal-gate" id="legal-gate"><div class="eyebrow">BEFORE CONNECTING YOUTUBE</div><h2>Review how CreatorFlow uses your channel data</h2><p>CreatorFlow uses YouTube APIs to read your channel analytics and, only if you separately authorize it, upload content using your Autopilot settings. AI prompts and narration are sent to the AI provider configured by the operator. Read the <a href="/static/terms.md" target="_blank">CreatorFlow terms</a>, <a href="/static/privacy.md" target="_blank">privacy notice</a>, <a href="https://www.youtube.com/t/terms" target="_blank">YouTube Terms</a>, and <a href="https://policies.google.com/privacy" target="_blank">Google Privacy Policy</a>.</p><form action="/legal/accept" method="post"><label><input type="checkbox" name="accept" value="yes" required> I have reviewed and accept these terms and privacy notices.</label><button class="button button-dark" type="submit">Accept and continue</button></form></section>{% endif %}
     <section class="welcome"><div class="welcome-copy"><div class="eyebrow">YOUR CHANNEL, WITH A PLAN</div><h1>Make every upload <em>count.</em></h1><p>Learn what viewers respond to, plan original videos, and grow at a pace that lasts.</p><div class="welcome-actions"><a class="button button-light" href="/studio"><span aria-hidden="true">✧</span> Create original video</a><a class="welcome-secondary" href="#planner">Plan your next upload <span aria-hidden="true">→</span></a></div></div><div class="welcome-art" aria-hidden="true"><img src="/static/home-characters.svg" alt=""></div></section>
+    <section class="visual-journey" aria-label="CreatorFlow workflow">
+      <div class="visual-journey-head"><div><div class="eyebrow">YOUR CREATOR WORKFLOW</div><h2>One workspace. Every step.</h2></div><span class="journey-live"><i></i> READY WHEN YOU ARE</span></div>
+      <div class="visual-cards">
+        <article class="visual-card"><img src="/static/visual-story.svg" alt="Story planning artwork"><div class="visual-card-copy"><span>01 · PLAN</span><b>Find the story worth telling</b><small>Turn a real viewer question into an original video idea.</small></div></article>
+        <article class="visual-card"><img src="/static/visual-insight.svg" alt="Analytics growth chart artwork"><div class="visual-card-copy"><span>02 · UNDERSTAND</span><b>Learn from your channel</b><small>Use real performance signals to guide your next experiment.</small></div></article>
+        <article class="visual-card"><img src="/static/visual-create.svg" alt="Video creation workspace artwork"><div class="visual-card-copy"><span>03 · CREATE</span><b>Build a video from your idea</b><small>Generate a script, narration and visual production pack.</small></div></article>
+      </div>
+    </section>
     {% if error %}<div class="alert">{{ error }}</div>{% endif %}
     {% if not data.connected %}<div class="demo-note"><span>ⓘ</span><div><b>You're viewing sample data.</b> Connect your channel to see real performance. Demo numbers are illustrative.</div>{% if not configured %}<small>Set up Google OAuth in <code>.env</code> first.</small>{% endif %}</div>{% endif %}
     <div class="channel-line"><div class="channel-avatar">▶</div><div><b>{{ data.channel.title }}</b><small>{% if data.connected %}Last 28 days · Updated from YouTube Analytics{% else %}Connect your channel for private analytics{% endif %}</small></div><span class="period">Last 28 days <span>⌄</span></span></div>
@@ -54,6 +62,6 @@
     <footer>CreatorFlow · Built for thoughtful, original creation <span>Growth takes time. No outcomes are guaranteed.</span></footer>
   </main>
   <dialog id="idea-dialog"><form action="/ideas" method="post"><div class="dialog-head"><div><div class="eyebrow">CONTENT PLANNER</div><h2>Add a video idea</h2></div><button type="button" class="close" id="close-dialog">×</button></div><label>Video idea<input name="title" required maxlength="160" placeholder="What will this video help someone do?"></label><label>Who is it for?<input name="audience" maxlength="240" placeholder="e.g. first-time home gardeners"></label><label>What original value will you add?<textarea name="viewer_value" maxlength="500" rows="3" placeholder="A lesson, demonstration, point of view, or experience only you can bring"></textarea></label><label>Target date<input type="date" name="target_date"></label><div class="dialog-actions"><button type="button" class="button button-quiet" id="cancel-dialog">Cancel</button><button class="button button-dark" type="submit">Save idea</button></div></form></dialog>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=creatorflow3"></script>
 </body>
 </html>
